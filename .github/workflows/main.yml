@@ -1,0 +1,101 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Debug APK (Standalone SDK + Gradle 8.7)
+        run: |
+          set -e
+          echo "=== 1. Настройка Java 17 ==="
+          if [ -n "$JAVA_HOME_17_X64" ] && [ -d "$JAVA_HOME_17_X64" ]; then
+            export JAVA_HOME="$JAVA_HOME_17_X64"
+          elif [ -d "/usr/lib/jvm/temurin-17-jdk-amd64" ]; then
+            export JAVA_HOME="/usr/lib/jvm/temurin-17-jdk-amd64"
+          elif [ -d "/usr/lib/jvm/java-17-openjdk-amd64" ]; then
+            export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+          else
+            sudo apt-get update -y && sudo apt-get install -y openjdk-17-jdk-headless unzip curl
+            export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
+          fi
+          export PATH="$JAVA_HOME/bin:$PATH"
+          java -version
+
+          echo "=== 2. Настройка Android SDK ==="
+          if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then
+            if [ -d "/usr/local/lib/android/sdk" ]; then
+              export ANDROID_HOME="/usr/local/lib/android/sdk"
+            else
+              export ANDROID_HOME="$HOME/android-sdk"
+              mkdir -p "$ANDROID_HOME/cmdline-tools"
+              curl -sSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o /tmp/cmdtools.zip
+              unzip -q /tmp/cmdtools.zip -d "$ANDROID_HOME/cmdline-tools"
+              mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            fi
+          fi
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          SDKMANAGER=$(find "$ANDROID_HOME" -name "sdkmanager" | head -n 1)
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+          fi
+
+          echo "=== 3. Установка Gradle 8.7 ==="
+          if [ ! -d "/tmp/gradle-8.7" ]; then
+            curl -sSL https://services.gradle.org/distributions/gradle-8.7-bin.zip -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+          fi
+          export PATH="/tmp/gradle-8.7/bin:$PATH"
+          gradle -v
+
+          echo "=== 4. Подготовка файлов проекта ==="
+          mkdir -p /tmp/apk_build
+          ZIP_FILE=$(find . -maxdepth 2 -name "*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Распаковка архива: $ZIP_FILE"
+            unzip -o "$ZIP_FILE" -d /tmp/apk_build
+          else
+            cp -r . /tmp/apk_build/
+          fi
+
+          PROJECT_FILE=$(find /tmp/apk_build -name "settings.gradle" | head -n 1)
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ОШИБКА: В репозитории нет ни архива .zip, ни файла settings.gradle!"
+            exit 1
+          fi
+
+          BUILD_DIR=$(dirname "$PROJECT_FILE")
+          cd "$BUILD_DIR"
+
+          if [ ! -f "app/src/main/AndroidManifest.xml" ] && [ -f "AndroidManifest.xml" ]; then
+            mkdir -p app/src/main/java/com/safran/geminidns
+            mkdir -p app/src/main/res/drawable
+            mv AndroidManifest.xml app/src/main/AndroidManifest.xml
+            [ -f "ic_launcher.xml" ] && mv ic_launcher.xml app/src/main/res/drawable/ic_launcher.xml
+            mv *.kt app/src/main/java/com/safran/geminidns/ || true
+          fi
+
+          sed -i 's/package="com.safran.geminidns"//g' app/src/main/AndroidManifest.xml
+
+          echo "=== 5. Компиляция APK ==="
+          gradle assembleDebug --no-daemon --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Gemini-DNS-Switcher-PRO.apk"
+          echo "=== ГОТОВО: APK успешно собран! ==="
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gemini-DNS-Switcher-PRO-APK
+          path: Gemini-DNS-Switcher-PRO.apk
+          if-no-files-found: error
